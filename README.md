@@ -2,6 +2,8 @@
 
 A Streamlit app that lets you find stocks using plain English. Type a query like *"show me tech stocks with a market cap over 1 billion and a beta less than 1.5"* and get a formatted summary of matching companies plus their latest SEC 8-K filings.
 
+![Stock Screener screenshot](screenshot.png)
+
 ## How it works
 
 1. Your query is sent to **GPT-4o-mini** which extracts filter parameters and calls the stock screener
