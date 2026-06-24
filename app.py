@@ -1,63 +1,88 @@
 import streamlit as st
 from openai import OpenAI
-import requests
+import yfinance as yf
+from yfinance.screener import screen, EquityQuery
 import json
-import time
 from dotenv import load_dotenv
 import os
 
 load_dotenv()
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-FMP_API_KEY = os.getenv("FMP_API_KEY")
-
-client = OpenAI(api_key=OPENAI_API_KEY)
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 st.title("Stock Screener")
 st.write("Ask in plain English — get a summary of matching stocks and their latest SEC filings.")
 
 
-def stock_screener(market_cap_more_than=None, market_cap_less_than=None, price_more_than=None, price_less_than=None, beta_more_than=None, beta_less_than=None, volume_more_than=None, volume_less_than=None, dividend_more_than=None, dividend_less_than=None, is_etf=False, is_actively_trading=False, sector=None, industry=None, country='US', exchange=None, limit=None):
-    base_url = 'https://financialmodelingprep.com/api/v3/stock-screener'
+def stock_screener(market_cap_more_than=None, market_cap_less_than=None,
+                   price_more_than=None, price_less_than=None,
+                   beta_more_than=None, beta_less_than=None,
+                   volume_more_than=None, volume_less_than=None,
+                   dividend_yield_more_than=None,
+                   sector=None, industry=None, exchange=None, limit=10):
 
-    params = {
-        'apikey': FMP_API_KEY,
-        'marketCapMoreThan': market_cap_more_than,
-        'marketCapLowerThan': market_cap_less_than,
-        'priceMoreThan': price_more_than,
-        'priceLowerThan': price_less_than,
-        'betaMoreThan': beta_more_than,
-        'betaLowerThan': beta_less_than,
-        'volumeMoreThan': volume_more_than,
-        'volumeLowerThan': volume_less_than,
-        'dividendMoreThan': dividend_more_than,
-        'dividendLowerThan': dividend_less_than,
-        'isEtf': is_etf,
-        'isActivelyTrading': is_actively_trading,
-        'sector': sector,
-        'industry': industry,
-        'country': country,
-        'exchange': exchange,
-        'limit': limit if limit is not None else 10,
-    }
+    filters = []
 
-    params = {k: v for k, v in params.items() if v is not None}
+    if market_cap_more_than:
+        filters.append(EquityQuery('gt', ['intradaymarketcap', market_cap_more_than]))
+    if market_cap_less_than:
+        filters.append(EquityQuery('lt', ['intradaymarketcap', market_cap_less_than]))
+    if price_more_than:
+        filters.append(EquityQuery('gt', ['intradayprice', price_more_than]))
+    if price_less_than:
+        filters.append(EquityQuery('lt', ['intradayprice', price_less_than]))
+    if beta_more_than:
+        filters.append(EquityQuery('gt', ['beta', beta_more_than]))
+    if beta_less_than:
+        filters.append(EquityQuery('lt', ['beta', beta_less_than]))
+    if volume_more_than:
+        filters.append(EquityQuery('gt', ['avgdailyvol3m', volume_more_than]))
+    if volume_less_than:
+        filters.append(EquityQuery('lt', ['avgdailyvol3m', volume_less_than]))
+    if dividend_yield_more_than:
+        filters.append(EquityQuery('gt', ['forward_dividend_yield', dividend_yield_more_than]))
+    if sector:
+        filters.append(EquityQuery('eq', ['sector', sector]))
+    if industry:
+        filters.append(EquityQuery('eq', ['industry', industry]))
+    if exchange:
+        filters.append(EquityQuery('eq', ['exchange', exchange]))
 
-    response = requests.get(base_url, params=params)
+    # Default to US exchanges if no exchange specified
+    if not exchange:
+        filters.append(EquityQuery('is-in', ['exchange', 'NMS', 'NYQ', 'ASE']))
 
-    st.expander("API Call").write(response.url)
+    if not filters:
+        return json.dumps([])
 
-    return json.dumps(response.json())
+    query = EquityQuery('and', filters) if len(filters) > 1 else filters[0]
+
+    try:
+        result = screen(query, size=limit)
+        quotes = result.get('quotes', [])
+        stocks = []
+        for q in quotes:
+            stocks.append({
+                'symbol': q.get('symbol'),
+                'companyName': q.get('longName') or q.get('shortName'),
+                'marketCap': q.get('marketCap'),
+                'price': q.get('regularMarketPrice'),
+                'beta': q.get('beta'),
+                'volume': q.get('regularMarketVolume'),
+                'exchange': q.get('fullExchangeName'),
+                'dividendYield': q.get('trailingAnnualDividendYield'),
+            })
+        return json.dumps(stocks)
+    except Exception as e:
+        return json.dumps({'error': str(e)})
 
 
-def get_8k(ticker):
-    base_url = f'https://financialmodelingprep.com/api/v3/sec_filings/{ticker}'
-    params = {
-        'apikey': FMP_API_KEY,
-        'type': '8-k',
-        'page': 0,
-    }
-    response = requests.get(base_url, params=params)
-    return json.dumps(response.json()[:5])
+def get_recent_8k(ticker):
+    try:
+        filings = yf.Ticker(ticker).get_sec_filings()
+        eightks = [f for f in filings if f.get('type') == '8-K'][:3]
+        return json.dumps([{'date': str(f['date']), 'title': f['title']} for f in eightks])
+    except Exception:
+        return json.dumps([])
 
 
 def run_conversation(user_message):
@@ -69,27 +94,23 @@ def run_conversation(user_message):
                 "type": "function",
                 "function": {
                     "name": "stock_screener",
-                    "description": "Fetch stock screening data from the FMP API",
+                    "description": "Screen stocks based on financial criteria using natural language filters",
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "market_cap_more_than": {"type": "number"},
-                            "market_cap_less_than": {"type": "number"},
-                            "price_more_than": {"type": "number"},
-                            "price_less_than": {"type": "number"},
-                            "beta_more_than": {"type": "number"},
-                            "beta_less_than": {"type": "number"},
-                            "volume_more_than": {"type": "number"},
-                            "volume_less_than": {"type": "number"},
-                            "dividend_more_than": {"type": "number"},
-                            "dividend_less_than": {"type": "number"},
-                            "is_etf": {"type": "boolean"},
-                            "is_actively_trading": {"type": "boolean"},
-                            "sector": {"type": "string"},
-                            "industry": {"type": "string"},
-                            "country": {"type": "string"},
-                            "exchange": {"type": "string"},
-                            "limit": {"type": "number"},
+                            "market_cap_more_than": {"type": "number", "description": "Minimum market cap in dollars"},
+                            "market_cap_less_than": {"type": "number", "description": "Maximum market cap in dollars"},
+                            "price_more_than": {"type": "number", "description": "Minimum stock price"},
+                            "price_less_than": {"type": "number", "description": "Maximum stock price"},
+                            "beta_more_than": {"type": "number", "description": "Minimum beta"},
+                            "beta_less_than": {"type": "number", "description": "Maximum beta"},
+                            "volume_more_than": {"type": "number", "description": "Minimum average daily volume"},
+                            "volume_less_than": {"type": "number", "description": "Maximum average daily volume"},
+                            "dividend_yield_more_than": {"type": "number", "description": "Minimum dividend yield as decimal, e.g. 0.02 for 2%"},
+                            "sector": {"type": "string", "description": "Sector name, e.g. Technology, Healthcare, Energy, Financial Services, Consumer Cyclical, Industrials, Communication Services, Consumer Defensive, Basic Materials, Real Estate, Utilities"},
+                            "industry": {"type": "string", "description": "Industry name"},
+                            "exchange": {"type": "string", "description": "Exchange code: NMS for NASDAQ, NYQ for NYSE, ASE for AMEX"},
+                            "limit": {"type": "number", "description": "Number of results to return, default 10"},
                         },
                         "required": [],
                     },
@@ -100,87 +121,87 @@ def run_conversation(user_message):
     )
 
     message = response.choices[0].message
-    if message.tool_calls:
-        tool_call = message.tool_calls[0]
-        function_name = tool_call.function.name
-        function_args = json.loads(tool_call.function.arguments)
-        function = globals()[function_name]
+    if not message.tool_calls:
+        st.write(message.content)
+        return
 
-        data = json.loads(function(
-            market_cap_more_than=function_args.get("market_cap_more_than"),
-            market_cap_less_than=function_args.get("market_cap_less_than"),
-            price_more_than=function_args.get("price_more_than"),
-            price_less_than=function_args.get("price_less_than"),
-            beta_more_than=function_args.get("beta_more_than"),
-            beta_less_than=function_args.get("beta_less_than"),
-            volume_more_than=function_args.get("volume_more_than"),
-            volume_less_than=function_args.get("volume_less_than"),
-            dividend_more_than=function_args.get("dividend_more_than"),
-            dividend_less_than=function_args.get("dividend_less_than"),
-            is_etf=function_args.get("is_etf"),
-            is_actively_trading=function_args.get("is_actively_trading", True),
-            sector=function_args.get("sector"),
-            industry=function_args.get("industry"),
-            country=function_args.get("country"),
-            exchange=function_args.get("exchange", "NASDAQ,NYSE,AMEX"),
-            limit=function_args.get("limit", 10),
-        ))
+    tool_call = message.tool_calls[0]
+    function_args = json.loads(tool_call.function.arguments)
 
-        function_response = ""
-        for i, stock_info in enumerate(data):
-            stock_info["8k"] = get_8k(stock_info['symbol'])
+    with st.spinner("Screening stocks..."):
+        raw = stock_screener(**function_args)
+
+    data = json.loads(raw)
+
+    if isinstance(data, dict) and 'error' in data:
+        st.error(f"Screener error: {data['error']}")
+        return
+    if not isinstance(data, list) or len(data) == 0:
+        st.warning("No stocks matched your criteria. Try broadening your filters.")
+        return
+
+    function_response = ""
+    with st.spinner("Fetching SEC filings..."):
+        for i, stock in enumerate(data):
+            stock['8k_filings'] = get_recent_8k(stock['symbol'])
             function_response += (
                 f"\n\nStock {i+1}:\n"
-                f"- Symbol: {stock_info['symbol']}\n"
-                f"- Company Name: {stock_info['companyName']}\n"
-                f"- Market Cap: {stock_info['marketCap']}\n"
-                f"- Sector: {stock_info['sector']}\n"
-                f"- Industry: {stock_info.get('industry', 'N/A')}\n"
-                f"- Beta: {stock_info['beta']}\n"
-                f"- Volume: {stock_info['volume']}\n"
-                f"- Exchange: {stock_info['exchange']}\n"
-                f"- Last Annual Dividend: {stock_info['lastAnnualDividend']}\n"
-                f"- Last 8k: {stock_info['8k']}"
+                f"- Symbol: {stock['symbol']}\n"
+                f"- Company: {stock['companyName']}\n"
+                f"- Market Cap: {stock['marketCap']}\n"
+                f"- Price: {stock['price']}\n"
+                f"- Beta: {stock['beta']}\n"
+                f"- Volume: {stock['volume']}\n"
+                f"- Exchange: {stock['exchange']}\n"
+                f"- Dividend Yield: {stock['dividendYield']}\n"
+                f"- Recent 8-K filings: {stock['8k_filings']}"
             )
 
-        placeholder_response = st.empty()
-        second_response = client.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {
-                    "role": "system",
-                    "content": """You are a stock screening assistant designed to help users find stocks based on natural language inputs. You can find stocks based on market capitalization, price, beta, volume, dividend, ETF status, actively trading status, sector, industry, country, and exchange.
-            Follow these instructions in your response:
-                - Market capitalization should always be in trillion, billion, or million (i.e 1 billion instead of 1000000000)
-                - Also use human readable format for price, beta, volume, and dividend (i.e 1 billion instead of 1000000000)
-                - Use 2 decimal places for market cap, price, beta, volume, and dividend
-                - Write company names in human readable format for company names (i.e exclude Inc, Ltd, etc.)
-                - add $ in front of market capitalization, price, and dividend - but escape it with a backslash (i.e \\$) for markdown formatting
-                - Only respond if there is an API response, if not say that there are no stocks that match the criteria
-                - Tell when last 8k was filed for each stock
-              """,
-                },
-                {"role": "user", "content": user_message},
-                {
-                    "role": "assistant",
-                    "content": message.content if message.content else "Initiating function call...",
-                },
-                {
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "content": function_response,
-                },
-            ],
-            stream=True,
-        )
+    placeholder = st.empty()
+    second_response = client.chat.completions.create(
+        model="gpt-4o",
+        messages=[
+            {
+                "role": "system",
+                "content": """You are a stock screening assistant. Present the results clearly.
+Follow these formatting rules:
+- Market cap in trillions/billions/millions (e.g. $1.2 billion), 2 decimal places
+- Escape $ with backslash (\\$) for markdown
+- Price and dividend yield to 2 decimal places
+- Beta to 2 decimal places
+- Volume in millions (e.g. 5.2M)
+- Use clean company names (drop Inc, Corp, Ltd)
+- For each stock mention when the last 8-K was filed and its title
+- If no stocks found, say so clearly""",
+            },
+            {"role": "user", "content": user_message},
+            {
+                "role": "assistant",
+                "content": message.content,
+                "tool_calls": [
+                    {
+                        "id": tool_call.id,
+                        "type": "function",
+                        "function": {
+                            "name": tool_call.function.name,
+                            "arguments": tool_call.function.arguments,
+                        },
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": tool_call.id, "content": function_response},
+        ],
+        stream=True,
+    )
 
-        assistant_response = ""
-        for chunk in second_response:
-            r_text = chunk.choices[0].delta.content
-            if r_text is not None:
-                assistant_response += r_text
-            placeholder_response.markdown(assistant_response, unsafe_allow_html=True)
-        return assistant_response
+    assistant_response = ""
+    for chunk in second_response:
+        text = chunk.choices[0].delta.content
+        if text:
+            assistant_response += text
+        placeholder.markdown(assistant_response, unsafe_allow_html=True)
+
+    return assistant_response
 
 
 user_input = st.text_input(
@@ -188,4 +209,7 @@ user_input = st.text_input(
     placeholder="Ex. show me tech stocks with a market cap greater than 1b and a beta less than 1.5",
 )
 if st.button("Run"):
-    run_conversation(user_input)
+    if user_input:
+        run_conversation(user_input)
+    else:
+        st.warning("Please enter a query.")
